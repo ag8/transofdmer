@@ -1,19 +1,51 @@
 import pickle
 
-import tokenmonster
 import numpy as np
 import torch as t
 import torch.nn as nn
 import torch.nn.functional as F
-from numpy import sin, cos, pi
+from matplotlib import pyplot as plt
+from numpy import sin, cos
 from torch import optim
+from torch._dynamo.utils import tabulate
 from torch.nn import init
 
 from tokenizer import PreambleTokenizer
 
-
 vocab_size = 40
-# vocab = tokenmonster.load(f"english-{vocab_size}-consistent-v1")
+DEVICE = t.device("cuda" if t.cuda.is_available() else "cpu")
+
+def visualize_attention_maps(model, prompt):
+    tokens = model.text_to_tokens(prompt)
+    _ = model.forward(tokens)
+    for i, layer in enumerate(model.attention):
+        for j, head in enumerate(layer.attention_heads):
+            plt.figure(figsize=(10, 10))
+            plt.imshow(head.attention_scores)
+            plt.title(f'Layer {i + 1}, Head {j + 1}')
+            plt.colorbar()
+            plt.show()
+
+def visualize_attention_outputs(model, prompt):
+    tokens = model.text_to_tokens(prompt)
+    _ = model.forward(tokens)
+    for i, layer in enumerate(model.attention):
+        plt.figure(figsize=(10, 10))
+        plt.imshow(layer.attention_output)
+        plt.title(f'Layer {i + 1} Attention Output')
+        plt.colorbar()
+        plt.show()
+
+def visualize_layer_outputs(model, prompt):
+    tokens = model.text_to_tokens(prompt)
+    _ = model.forward(tokens)
+    for i, output in enumerate(model.layer_outputs):
+        plt.figure(figsize=(10, 10))
+        plt.imshow(output)
+        plt.title(f'Layer {i + 1} Output')
+        plt.colorbar()
+        plt.show()
+
 
 class Transformer(nn.Module):
     def __init__(self, *args, **kwargs):
@@ -27,29 +59,33 @@ class Transformer(nn.Module):
         self.eval_interval = 300
         self.learning_rate = 1e-2
 
-        self.embedding_dimension = 1024
-        self.embedding_matrix = t.empty(self.embedding_dimension, vocab_size, dtype=t.float32)
+        self.embedding_dimension = 20
+        self.embedding_matrix = nn.Parameter(t.empty(self.embedding_dimension, vocab_size, dtype=t.float32).to(DEVICE))
         init.xavier_uniform_(self.embedding_matrix)
 
-        self.de_embedding_matrix = t.empty(vocab_size, self.embedding_dimension, dtype=t.float32)
+        self.de_embedding_matrix = nn.Parameter(t.empty(vocab_size, self.embedding_dimension, dtype=t.float32).to(DEVICE))
         init.xavier_uniform_(self.de_embedding_matrix)
 
-        self.d_key = 64
-        self.d_value = 63
-        self.num_attention_heads = 8
+        self.d_key = 8
+        self.d_value = 7
+        self.num_attention_heads = 3
 
         # Initialize N groups of self.num_attention_heads multihead attentions
-        self.N = 10
-        self.attention = [MaskedMultiheadAttention(self.d_key, self.d_value, self.num_attention_heads, self.blocksize, self.embedding_dimension) for _ in range(self.N)]
+        self.N = 1
+        self.attention = nn.ModuleList([MaskedMultiheadAttention(self.d_key, self.d_value, self.num_attention_heads, self.blocksize, self.embedding_dimension) for _ in range(self.N)])
 
         # Initialize N feedforward layers
-        self.feedforward_layers = [nn.Linear(self.embedding_dimension, self.embedding_dimension) for _ in range(self.N)]
+        self.feedforward_layers = nn.ModuleList([nn.Linear(self.embedding_dimension, self.embedding_dimension) for _ in range(self.N)])
 
         self.norm = nn.LayerNorm(self.embedding_dimension)
 
+
+        # Visualizations
+        self.layer_outputs = []
+
     def text_to_tokens(self, input):
         tokens = PreambleTokenizer.encode_text(input)
-        return np.asarray(tokens)
+        return t.tensor(np.asarray(tokens)).to(DEVICE)
 
     def embed_tokens(self, tokens):
         """
@@ -58,7 +94,7 @@ class Transformer(nn.Module):
         """
 
         # One hot embedding: takes in a [batchsize, blocksize] tensor of tokens and returns a [batchsize, blocksize, vocab_size] tensor of one-hot embeddings
-        one_hot = F.one_hot(t.tensor(tokens.astype(np.int64)).to(t.int64), num_classes=vocab_size).to(t.float32)
+        one_hot = F.one_hot(t.tensor(tokens).to(DEVICE), num_classes=vocab_size).float()
 
         embedded = self.embedding_matrix @ one_hot.T
 
@@ -67,18 +103,18 @@ class Transformer(nn.Module):
         # Followed by a row of cos(w1 * 0), cos(w1 * 1), cos(w1 * 2), ..., cos(w1 * blocksize)
         num_tokens = len(tokens)
         pos_enc = t.tensor([sin(i) for i in range(num_tokens)] + [cos(i) for i in range(num_tokens)]).reshape(2,
-                                                                                                              num_tokens)
+                                                                                                              num_tokens).to(DEVICE)
         for k in range(1, self.embedding_dimension // 2):
             w_k = 1 / (10000 ** (2 * k / self.embedding_dimension))
-            sine_row = t.tensor([sin(w_k * i) for i in range(num_tokens)])
-            cosine_row = t.tensor([cos(w_k * i) for i in range(num_tokens)])
+            sine_row = t.tensor([sin(w_k * i) for i in range(num_tokens)]).to(DEVICE)
+            cosine_row = t.tensor([cos(w_k * i) for i in range(num_tokens)]).to(DEVICE)
             pos_enc = t.vstack([pos_enc, sine_row, cosine_row])
 
         # Add the positional encoding to the embedding
         embedded = embedded + pos_enc
 
         # Create a [embedding_dimension, blocksize] matrix of zeros, and paste the embedded tokens into it
-        final_embedding = t.zeros((self.blocksize, self.embedding_dimension)).T
+        final_embedding = t.zeros((self.blocksize, self.embedding_dimension)).to(DEVICE).T
         final_embedding[:embedded.shape[0], :embedded.shape[1]] = embedded
 
         return final_embedding.T
@@ -95,6 +131,8 @@ class Transformer(nn.Module):
             nextadded = normed + feedforwarded
             nextnormed = self.norm(nextadded)
 
+            self.layer_outputs.append(embeddings.detach().cpu().numpy())  # save for visualization
+
             embeddings = nextnormed
 
         # Apply the final linear layer
@@ -109,14 +147,25 @@ class Transformer(nn.Module):
         tokens = self.text_to_tokens(prompt)
 
 
-        for i in range(self.maximum_sequence_length - len(tokens)):
-            output = self.forward(tokens)
+        for i in range(100):
+            output = self.forward(tokens[-self.blocksize:])
             next_token = t.argmax(output[-1])
 
-            # Append the next token to the tokens np array
-            tokens = np.append(tokens, next_token)
+            # Append the next token to the tokens tensor array
+            tokens = t.cat([tokens, next_token.unsqueeze(0)])
 
-        return PreambleTokenizer.decode_tokens(tokens)
+        return PreambleTokenizer.decode_tokens(tokens.detach().cpu().numpy().tolist())
+
+    def view_probs(self, prompt):
+        tokens = self.text_to_tokens(prompt)
+
+        output = self.forward(tokens)
+
+        # Get the top ten token probabilities
+        top_ten = t.topk(output[-1], 10)
+
+        # Display the top ten decoded tokens, with their probabilities in a nice ascii table
+        print(tabulate([[PreambleTokenizer.decode_tokens([i.item()]), j.item()] for i, j in zip(top_ten.indices, top_ten.values)], headers=['Token', 'Probability']))
 
 class MaskedMultiheadAttention(nn.Module):
     def __init__(self, d_key, d_value, num_attention_heads, blocksize, embedding_dimension):
@@ -127,20 +176,19 @@ class MaskedMultiheadAttention(nn.Module):
         self.blocksize = blocksize
         self.embedding_dimension = embedding_dimension
 
-        self.attention_heads = [AttentionHead(self.d_key, self.d_value, self.blocksize, self.embedding_dimension) for _ in range(self.num_attention_heads)]
+        self.attention_heads = nn.ModuleList([AttentionHead(self.d_key, self.d_value, self.blocksize, self.embedding_dimension) for _ in range(self.num_attention_heads)])
 
-        self.multi_head_linear = nn.Parameter(t.empty(self.num_attention_heads * self.d_value, self.embedding_dimension))
-
-        # Initialization using Xavier Uniform method
-        nn.init.xavier_uniform_(self.multi_head_linear)
+        self.multi_head_linear = nn.Linear(self.num_attention_heads * self.d_value, self.embedding_dimension)
 
     def forward(self, embedding_matrix):
         # Concatenate the outputs of each attention head
         concatenated = t.cat([head.attention(embedding_matrix) for head in self.attention_heads], dim=1)
 
+        self.attention_output = concatenated.detach().cpu().numpy()  # save for visualization
+
         # Multiply by the linear layer
-        assert (concatenated @ self.multi_head_linear).shape == (self.blocksize, self.embedding_dimension)
-        return concatenated @ self.multi_head_linear
+        # assert (concatenated @ self.multi_head_linear).shape == (self.blocksize, self.embedding_dimension)
+        return self.multi_head_linear(concatenated)
 
 class AttentionHead(nn.Module):
     def __init__(self, d_key, d_value, block_size, embedding_dimension):
@@ -150,17 +198,18 @@ class AttentionHead(nn.Module):
         self.block_size = block_size
         self.embedding_dimension = embedding_dimension
 
-        self.Q = nn.Parameter(t.empty(embedding_dimension, d_key))
-        self.K = nn.Parameter(t.empty(embedding_dimension, d_key))
-        self.V = nn.Parameter(t.empty(embedding_dimension, d_value))
+        self.Q = nn.Parameter(t.empty(embedding_dimension, d_key).to(DEVICE))
+        self.K = nn.Parameter(t.empty(embedding_dimension, d_key).to(DEVICE))
+        self.V = nn.Parameter(t.empty(embedding_dimension, d_value).to(DEVICE))
 
         # Initialization using Xavier Uniform method
         nn.init.xavier_uniform_(self.Q)
         nn.init.xavier_uniform_(self.K)
         nn.init.xavier_uniform_(self.V)
 
-        self.mask = t.triu(t.ones(self.block_size, self.block_size) * float('-inf'), diagonal=1)
+        self.mask = t.triu(t.ones(self.block_size, self.block_size) * -1e9, diagonal=1)
         self.mask = self.mask.to(t.float32)
+        self.mask = self.mask.to(DEVICE)
 
     def attention(self, embedding_matrix):
         q = embedding_matrix @ self.Q  # [block_size, d_key]
@@ -169,8 +218,11 @@ class AttentionHead(nn.Module):
 
         product = q @ k.T  # [block_size, block_size]
         scaled = product / (self.d_key ** 0.5)  # [block_size, block_size]
-        # TODO: add a mask here
-        softmaxed = F.softmax(scaled, dim=1)  # [block_size, block_size]
+        # Add a mask here
+        masked = scaled + self.mask
+
+        softmaxed = F.softmax(masked, dim=-1)  # [block_size, block_size]
+        self.attention_scores = softmaxed.detach().cpu().numpy()  # save for visualization
         return softmaxed @ v  # [block_size, d_value]
 
 
@@ -191,13 +243,20 @@ sample_data = pickle.load(open("tokenized_samples_targets.pkl", "rb"))
 
 # 2. Create a transformer
 transformer = Transformer()
+transformer = transformer.to(DEVICE)
+
+for name, param in transformer.named_parameters():
+    if param.requires_grad:
+        print(name, param.shape)
 
 # 4. Create an optimizer
 optimizer = optim.Adam(transformer.parameters(), lr=0.001)
 
 # 5. Train the transformer
-for epoch in range(1000):
+for epoch in range(1002):
     for i, (sample, target) in enumerate(sample_data):
+        sample, target = t.tensor(sample).to(DEVICE), t.tensor(target).to(DEVICE)
+
         # Zero the gradients
         optimizer.zero_grad()
 
@@ -206,7 +265,7 @@ for epoch in range(1000):
 
         # Calculate loss
         # This takes the [target]th element of each row of output, and sums the logs of 'em
-        loss = t.sum(-t.log(output[t.arange(output.size(0)), t.tensor(target.astype(np.int32))]))
+        loss = t.sum(-t.log(output[t.arange(output.size(0)), t.tensor(target.to(t.int32))]))
 
         # Backward pass
         loss.backward()
@@ -214,8 +273,14 @@ for epoch in range(1000):
         # Update weights
         optimizer.step()
 
-        if i % 100 == 0:
-            print(f"Epoch {epoch}, sample {i}, loss {loss.item()}")
+        if i % 1000 == 0:
+            print(f"Epoch {epoch}, sample {i}, loss {loss.detach().cpu().numpy().item()}")
 
             # Generate some text
-            print(transformer.generate_text("We the"))
+            print(transformer.generate_text("We the People of the United States, in"))
+
+            if epoch % 1000 == 0 and i % 1000 == 0 and epoch > 2:
+                visualize_attention_maps(transformer, "We the People of the ")
+                visualize_attention_outputs(transformer, "We the")
+                visualize_layer_outputs(transformer, "We the")
+

@@ -53,6 +53,6 @@ if __name__ == '__main__':
         return PreambleTokenizer.encode_text(text)
 
 
-    pairs = create_sample_target_pairs('get_low.txt', dummy_tokenizer, sample_length=20,
-                                       stride=10)
+    pairs = create_sample_target_pairs('get_low.txt', dummy_tokenizer, sample_length=8,
+                                       stride=4)
     save_pairs_to_pickle(np.asarray(pairs), 'tokenized_samples_targets.pkl')
