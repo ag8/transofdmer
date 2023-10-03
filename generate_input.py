@@ -7,6 +7,7 @@ from tokenizer import PreambleTokenizer
 
 vocab_size = 32000
 vocab = tokenmonster.load(f"english-{vocab_size}-consistent-v1")
+tokenizer = PreambleTokenizer("get_low.txt")
 
 def create_sample_target_pairs(filename, tokenizer, sample_length=100, stride=50):
     """
@@ -50,7 +51,8 @@ def save_pairs_to_pickle(pairs, pickle_filename):
 if __name__ == '__main__':
     # Dummy tokenizer function for demonstration, replace with your own
     def dummy_tokenizer(text):
-        return PreambleTokenizer.encode_text(text)
+        return tokenizer.encode_text(text)
+        # return PreambleTokenizer.encode_text(text)
 
 
     pairs = create_sample_target_pairs('get_low.txt', dummy_tokenizer, sample_length=8,

@@ -12,8 +12,10 @@ from torch.nn import init
 
 from tokenizer import PreambleTokenizer
 
-vocab_size = 40
+# Count number of distinct words in get_low.txt in one line
+vocab_size = len(set(open('get_low.txt', 'r').read().split())) + 10
 DEVICE = t.device("cuda" if t.cuda.is_available() else "cpu")
+tokenizer = PreambleTokenizer("get_low.txt")
 
 def visualize_attention_maps(model, prompt):
     tokens = model.text_to_tokens(prompt)
@@ -59,7 +61,7 @@ class Transformer(nn.Module):
         self.eval_interval = 300
         self.learning_rate = 1e-2
 
-        self.embedding_dimension = 20
+        self.embedding_dimension = 200
         self.embedding_matrix = nn.Parameter(t.empty(self.embedding_dimension, vocab_size, dtype=t.float32).to(DEVICE))
         init.xavier_uniform_(self.embedding_matrix)
 
@@ -84,7 +86,7 @@ class Transformer(nn.Module):
         self.layer_outputs = []
 
     def text_to_tokens(self, input):
-        tokens = PreambleTokenizer.encode_text(input)
+        tokens = tokenizer.encode_text(input)
         return t.tensor(np.asarray(tokens)).to(DEVICE)
 
     def embed_tokens(self, tokens):
@@ -154,7 +156,7 @@ class Transformer(nn.Module):
             # Append the next token to the tokens tensor array
             tokens = t.cat([tokens, next_token.unsqueeze(0)])
 
-        return PreambleTokenizer.decode_tokens(tokens.detach().cpu().numpy().tolist())
+        return tokenizer.decode_tokens(tokens.detach().cpu().numpy().tolist())
 
     def view_probs(self, prompt):
         tokens = self.text_to_tokens(prompt)
@@ -165,7 +167,7 @@ class Transformer(nn.Module):
         top_ten = t.topk(output[-1], 10)
 
         # Display the top ten decoded tokens, with their probabilities in a nice ascii table
-        print(tabulate([[PreambleTokenizer.decode_tokens([i.item()]), j.item()] for i, j in zip(top_ten.indices, top_ten.values)], headers=['Token', 'Probability']))
+        print(tabulate([[tokenizer.decode_tokens([i.item()]), j.item()] for i, j in zip(top_ten.indices, top_ten.values)], headers=['Token', 'Probability']))
 
 class MaskedMultiheadAttention(nn.Module):
     def __init__(self, d_key, d_value, num_attention_heads, blocksize, embedding_dimension):
